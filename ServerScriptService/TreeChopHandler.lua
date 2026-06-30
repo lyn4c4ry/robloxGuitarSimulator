@@ -11,13 +11,28 @@ local TweenService = game:GetService("TweenService")
 local Debris = game:GetService("Debris")
 local PlayerData = require(ReplicatedStorage.Modules.PlayerData)
 
+local remoteEvents = ReplicatedStorage:WaitForChild("RemoteEvents")
+local xpGained = remoteEvents:WaitForChild("XPGained")
+-- NEW: fired whenever a player gains wood from chopping, so the client can
+-- show a "+X Wood" popup (mirrors how XPGained works).
+local woodGained = remoteEvents:FindFirstChild("WoodGained")
+if not woodGained then
+	woodGained = Instance.new("RemoteEvent")
+	woodGained.Name = "WoodGained"
+	woodGained.Parent = remoteEvents
+end
+
 local DEFAULTS = {
-	WoodReward = 1,
+	-- NEW: wood reward is now a random range instead of a fixed amount.
+	MinWood = 1,
+	MaxWood = 3,
 	FallTime = 0.7,        -- initial wait before checking if the tree has settled
 	GroundWait = 2,         -- seconds the fallen tree stays visible on the ground
 	RespawnTime = 3,        -- seconds the tree stays gone before respawning (countdown shown)
 	FadeTime = 0.35,        -- fade out duration when the tree disappears
 	ChopCooldown = 1,       -- extra cooldown after respawn before it can be chopped again
+	MinXP = 3,
+	MaxXP = 5,
 }
 
 local playerCooldowns = {}     -- [player] = last chop time, used as a simple spam guard
@@ -29,12 +44,15 @@ local busyTrees = {}           -- [treeModel] = true while a chop sequence is ru
 
 local function getTreeConfig(treeModel)
 	return {
-		WoodReward = treeModel:GetAttribute("WoodReward") or DEFAULTS.WoodReward,
+		MinWood = treeModel:GetAttribute("MinWood") or DEFAULTS.MinWood,
+		MaxWood = treeModel:GetAttribute("MaxWood") or DEFAULTS.MaxWood,
 		FallTime = treeModel:GetAttribute("FallTime") or DEFAULTS.FallTime,
 		GroundWait = treeModel:GetAttribute("GroundWait") or DEFAULTS.GroundWait,
 		RespawnTime = treeModel:GetAttribute("RespawnTime") or DEFAULTS.RespawnTime,
 		FadeTime = treeModel:GetAttribute("FadeTime") or DEFAULTS.FadeTime,
 		ChopCooldown = treeModel:GetAttribute("ChopCooldown") or DEFAULTS.ChopCooldown,
+		MinXP = treeModel:GetAttribute("MinXP") or DEFAULTS.MinXP,
+		MaxXP = treeModel:GetAttribute("MaxXP") or DEFAULTS.MaxXP,
 	}
 end
 
@@ -43,9 +61,21 @@ end
 local function updateLeaderstats(player)
 	local leaderstats = player:FindFirstChild("leaderstats")
 	if not leaderstats then return end
+
 	local woodValue = leaderstats:FindFirstChild("Wood")
 	if woodValue then
 		woodValue.Value = PlayerData.GetWood(player)
+	end
+
+	local moneyValue = leaderstats:FindFirstChild("Money")
+	if moneyValue then
+		moneyValue.Value = PlayerData.GetMoney(player)
+	end
+
+	-- NEW: Level is now also tracked on the leaderboard.
+	local levelValue = leaderstats:FindFirstChild("Level")
+	if levelValue then
+		levelValue.Value = PlayerData.GetLevel(player)
 	end
 end
 
@@ -364,6 +394,23 @@ local function onChop(player, treeModel, treesFolder)
 	playerCooldowns[player] = tick()
 	prompt.Enabled = false
 
+	-- CHANGED: rewards (Wood + XP) are now given INSTANTLY, the moment the
+	-- chop is triggered — no waiting on the fall animation, sound delays,
+	-- or "has it settled" physics checks. This is what made the popups and
+	-- the XP bar feel laggy before: they used to fire only after the tree
+	-- had already fallen and settled (which could take 1-3+ seconds).
+	local woodAmount = math.random(config.MinWood, config.MaxWood)
+	PlayerData.AddWood(player, woodAmount)
+	updateLeaderstats(player)
+	woodGained:FireClient(player, woodAmount)
+
+	local xpAmount = math.random(config.MinXP, config.MaxXP)
+	local xpResult = PlayerData.AddXP(player, xpAmount)
+	xpGained:FireClient(player, xpAmount, xpResult)
+
+	-- Level may have changed as part of AddXP, keep leaderstats in sync
+	updateLeaderstats(player)
+
 	emitLeafBurst(treeModel, 18)
 	spawnWoodEffect(treeModel)
 
@@ -378,9 +425,6 @@ local function onChop(player, treeModel, treesFolder)
 	dropTreeWithPhysics(treeModel, player, config.FallTime)
 
 	emitLeafBurst(treeModel, 12)
-
-	PlayerData.AddWood(player, config.WoodReward)
-	updateLeaderstats(player)
 
 	-- stay fallen on the ground for a bit
 	task.wait(config.GroundWait)
